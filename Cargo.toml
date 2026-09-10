@@ -1,0 +1,22 @@
+[package]
+name = "ascend_kas"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Standalone Kaspa Stratum miner for Huawei Ascend 910B"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "env"] }
+env_logger = "0.11"
+hex = "0.4"
+libloading = "0.8"
+log = "0.4"
+rand = "0.8"
+serde_json = "1"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "sync", "time", "signal"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
