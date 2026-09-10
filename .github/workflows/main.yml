@@ -1,0 +1,107 @@
+name: Build and Pre-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ascend-kas-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CANN_INSTALLER: Ascend-cann-toolkit_9.1.0_linux-aarch64.run
+  CANN_URL: https://ascend.devcloud.huaweicloud.com/artifactory/cann-run-mirror/software/legacy/20260720000024864/Ascend-cann-toolkit_9.1.0_linux-aarch64.run
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang pkg-config wget file binutils
+          rustup update stable
+          rustup default stable
+
+      - name: Rust tests
+        run: cargo test --all-targets
+
+      - name: Install CANN
+        run: |
+          set -euxo pipefail
+          echo "Downloading CANN..."
+          wget -q "$CANN_URL" -O "$CANN_INSTALLER"
+          chmod +x "$CANN_INSTALLER"
+          echo "Installing CANN..."
+          bash "./$CANN_INSTALLER" --install --quiet
+          rm -f "$CANN_INSTALLER"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -eo pipefail
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+          export PYTHONPATH="${PYTHONPATH:-}"
+          export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:-}"
+          for f in \
+            "$HOME/Ascend/cann/set_env.sh" \
+            "$HOME/Ascend/ascend-toolkit/set_env.sh" \
+            "$HOME/Ascend/ascend-toolkit/latest/set_env.sh" \
+            "$HOME/Ascend/ascend-toolkit/latest/bin/setenv.bash" \
+            /usr/local/Ascend/cann/set_env.sh \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/ascend-toolkit/latest/set_env.sh \
+            /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash; do
+            if [[ -f "$f" ]]; then source "$f"; break; fi
+          done
+          if [[ -z "${ASC_MODULES:-}" ]]; then
+            FIND_ASC="$(find "$HOME/Ascend" /usr/local/Ascend -type f -name FindASC.cmake -print -quit 2>/dev/null || true)"
+            [[ -n "$FIND_ASC" ]] && export ASC_MODULES="$(dirname "$FIND_ASC")"
+          fi
+          test -f "${ASC_MODULES:?ASC_MODULES not found}/FindASC.cmake"
+          make
+
+      - name: Verify
+        run: |
+          set -euxo pipefail
+          test -s build/ascend_kas
+          test -s build/libascend_kas.so
+          file build/ascend_kas | grep -qiE 'ARM aarch64|ARM64|aarch64'
+          file build/libascend_kas.so | grep -qiE 'ARM aarch64|ARM64|aarch64'
+
+      - name: Package
+        id: package
+        run: |
+          set -euxo pipefail
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          TAG="v${VERSION}-prerelease.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          ARCHIVE="ascend_kas-${TAG}-linux-aarch64.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/$ARCHIVE" build/ascend_kas build/libascend_kas.so
+          cp build/ascend_kas build/libascend_kas.so dist/
+          (cd dist && sha256sum "$ARCHIVE" ascend_kas libascend_kas.so > SHA256SUMS)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ascend-kas-linux-aarch64-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            build/ascend_kas
+            build/libascend_kas.so
+
+      - name: Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.package.outputs.tag }}" \
+            "dist/${{ steps.package.outputs.archive }}" \
+            dist/ascend_kas dist/libascend_kas.so dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "ascend_kas ${{ steps.package.outputs.tag }} (Linux AArch64)" \
+            --prerelease --generate-notes
